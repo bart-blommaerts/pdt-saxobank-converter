@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saxo Bank to PDT Converter</title>
+    <!-- SheetJS for reading and writing Excel files -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f1f5f9; color: #334155; margin: 0; padding: 40px 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); max-width: 600px; width: 100%; }
+        h1 { margin-top: 0; color: #0f172a; font-size: 1.5rem; }
+        .dropzone { border: 2px dashed #94a3b8; border-radius: 8px; padding: 40px 20px; text-align: center; background-color: #f8fafc; cursor: pointer; transition: all 0.2s; margin-bottom: 20px; }
+        .dropzone:hover, .dropzone.dragover { border-color: #3b82f6; background-color: #eff6ff; }
+        .dropzone p { margin: 10px 0; font-size: 1rem; color: #475569; }
+        input[type="file"] { display: none; }
+        .btn { background-color: #3b82f6; color: white; padding: 10px 24px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 1rem; }
+        .btn:hover { background-color: #2563eb; }
+        #log { margin-top: 20px; text-align: left; width: 100%; max-width: 600px; }
+        .log-item { background: #fff; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid #3b82f6; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .log-success { border-left-color: #10b981; }
+        .log-error { border-left-color: #ef4444; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Saxo to Portfolio Dividend Tracker</h1>
+    <p>Upload your Saxo Bank exports. The tool parses them locally, applies the correct PDT mappings and math, sorts chronologically, and downloads a ready-to-import `.xlsx` file.</p>
+    
+    <div class="dropzone" id="dropzone">
+        <p>📁 Drag and drop Saxo Bank <strong>.xlsx</strong> files here (multiple files supported)</p>
+        <p>— or —</p>
+        <button class="btn" onclick="document.getElementById('fileInput').click()">Browse Files</button>
+        <input type="file" id="fileInput" accept=".xlsx, .xls" multiple>
+    </div>
+</div>
+
+<div id="log"></div>
+
+<script>
+    const HEADERS_TRANSACTIONS = ["broker","name","type","search","exchange","date","time","transaction-action","transaction-amount","transaction-price","transaction-price-currency","transaction-price-exchange-rate","transaction-price-exchange-rate-currency","transaction-costs","transaction-costs-currency","transaction-costs-exchange-rate","transaction-costs-exchange-rate-currency","transaction-tax","transaction-tax-currency","transaction-tax-exchange-rate","transaction-tax-exchange-rate-currency"];
+    const HEADERS_DIVIDENDS = ["broker","name","type","search","exchange","date","time","dividend-action","dividend-amount","dividend-amount-currency","dividend-amount-exchange-rate","dividend-amount-exchange-rate-currency","dividend-tax","dividend-tax-currency","dividend-tax-exchange-rate","dividend-tax-exchange-rate-currency","dividend-costs","dividend-costs-currency","dividend-costs-exchange-rate","dividend-costs-exchange-rate-currency"];
+    const HEADERS_BOOKINGS = ["broker","date","time","booking-action","booking-amount","booking-amount-currency"];
+    const HEADERS_EXPENSES = ["broker","date","time","expense-action","expense-amount","expense-amount-currency"];
+
+    const fileInput = document.getElementById('fileInput');
+    const dropzone = document.getElementById('dropzone');
+    const logDiv = document.getElementById('log');
+
+    let allTransactions = [];
+    let allDividends = [];
+    let allBookings = [];
+    let filesProcessed = 0;
+    let totalFiles = 0;
+
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
+    dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    });
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files.length) handleFiles(e.target.files);
+        fileInput.value = '';
+    });
+
+    function logMessage(message, type = 'info') {
+        const div = document.createElement('div');
+        div.className = `log-item ${type === 'success' ? 'log-success' : type === 'error' ? 'log-error' : ''}`;
+        div.innerHTML = message;
+        logDiv.prepend(div);
+    }
+
+    function handleFiles(files) {
+        totalFiles = files.length;
+        filesProcessed = 0;
+        allTransactions = [];
+        allDividends = [];
+        allBookings = [];
+
+        Array.from(files).forEach(file => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    processExcel(e.target.result, file.name);
+                } catch (err) {
+                    logMessage(`<strong>${file.name}:</strong> Error processing file. ${err.message}`, 'error');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    function parseDate(excelDateString) {
+        if (!excelDateString) return new Date(0);
+        let d = new Date(excelDateString);
+        if (!isNaN(d.getTime())) return d;
+        return new Date(0); 
+    }
+
+    function formatDateOutput(dateObj) {
+        if (dateObj.getTime() === 0) return "";
+        const day = String(dateObj.getDate()); 
+        const month = String(dateObj.getMonth() + 1);
+        return `${day}-${month}-${dateObj.getFullYear()}`;
+    }
+
+    function parseActies(val) {
+        if (!val || typeof val !== 'string') return { action: '', shares: 0, price: 0 };
+        const match = val.match(/(Koop|Verkoop)\s+(-?\d+(?:\.\d+)?)\s+@\s+(\d+(?:\.\d+)?)/i);
+        if (match) {
+            return {
+                action: match[1].toLowerCase() === 'koop' ? 'Buy' : 'Sell',
+                shares: Math.abs(parseFloat(match[2])),
+                price: parseFloat(match[3])
+            };
+        }
+        return { action: '', shares: 0, price: 0 };
+    }
+
+    function processExcel(arrayBuffer, filename) {
+        const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+
+        rows.forEach(row => {
+            const rawType = String(row['Transactietype'] || row['Type'] || '').trim();
+            const typeLower = rawType.toLowerCase();
+            
+            const dateObj = parseDate(row['Transactiedatum'] || row['Trade Date'] || row['Datum']);
+            const formattedDate = formatDateOutput(dateObj);
+
+            // TRANSACTIONS
+            if (typeLower === 'transactie' || typeLower === 'transaction') {
+                const parsed = parseActies(row['Acties'] || row['Action'] || '');
+                const instrumentType = String(row['Type'] || '').trim().toLowerCase();
+                
+                let instrName = String(row['Instrument'] || "").trim();
+                if (instrName && !instrName.endsWith("(c)")) {
+                    instrName += " (c)";
+                }
+
+                const totalCosts = Math.abs(parseFloat(row['Totale kosten'] || 0));
+                const conversionCost = Math.abs(parseFloat(row['Conversion cost'] || 0));
+                const exRate = parseFloat(row['Omrekeningskoers'] || 1) || 1;
+                
+                let finalExRate = exRate !== 1 ? (1 / exRate) : 1;
+                if (finalExRate !== 1) {
+                    finalExRate = Math.round(finalExRate * 1000000) / 1000000;
+                }
+                
+                const tradeVolumeInCurrency = parsed.shares * parsed.price;
+                const tradeVolumeInBase = tradeVolumeInCurrency * exRate; 
+                
+                let taxRate = 0;
+                if (instrumentType === 'etf' || instrumentType === 'etc') { taxRate = 0.0012; }
+                else if (instrumentType === 'stock') { taxRate = 0.0035; }
+
+                let calculatedTax = Math.round((tradeVolumeInBase * taxRate) * 100) / 100;
+                
+                if (calculatedTax > totalCosts || calculatedTax === 0) {
+                    calculatedTax = 0; 
+                }
+
+                let brokerFee = Math.round((totalCosts - calculatedTax - conversionCost) * 100) / 100;
+                if (brokerFee < 0) brokerFee = 0;
+
+                allTransactions.push({
+                    _sortDate: dateObj, 
+                    "broker": "SaxoBank",
+                    "name": instrName,
+                    "type": "Stock market",
+                    "search": row['Instrument ISIN'] || "",
+                    "exchange": row['Uitwisselingsbeschrijving'] || "",
+                    "date": formattedDate,
+                    "time": "12:00",
+                    "transaction-action": parsed.action,
+                    "transaction-amount": parsed.shares,
+                    "transaction-price": parsed.price,
+                    "transaction-price-currency": row['Instrumentvaluta'] || "",
+                    "transaction-price-exchange-rate": finalExRate !== 1 ? finalExRate : "",
+                    "transaction-price-exchange-rate-currency": finalExRate !== 1 ? (row['Valuta'] || "") : "",
+                    "transaction-costs": brokerFee || "",
+                    "transaction-costs-currency": row['Valuta'] || "",
+                    "transaction-costs-exchange-rate": "",
+                    "transaction-costs-exchange-rate-currency": "",
+                    "transaction-tax": calculatedTax || "",
+                    "transaction-tax-currency": calculatedTax > 0 ? (row['Valuta'] || "EUR") : "",
+                    "transaction-tax-exchange-rate": "",
+                    "transaction-tax-exchange-rate-currency": ""
+                });
+            } 
+            
+            // DIVIDENDS
+            else if (typeLower === 'corporate action' || typeLower.includes('dividend') || typeLower === 'cashdividend') {
+                let divName = String(row['Instrument'] || "").trim();
+                if (divName && !divName.endsWith("(c)")) {
+                    divName += " (c)";
+                }
+
+                const instrCurr = String(row['Instrumentvaluta'] || row['Valuta'] || 'EUR').trim();
+                const baseCurr = String(row['Valuta'] || 'EUR').trim();
+                
+                let saxoExRate = parseFloat(row['Omrekeningskoers'] || 1) || 1;
+                let finalExRate = saxoExRate !== 1 ? (1 / saxoExRate) : 1;
+                
+                const netReceivedBase = Math.abs(parseFloat(row['Boekingsbedrag'] || 0));
+                const netReceivedInstr = netReceivedBase * finalExRate;
+
+                const taxMultiplier = (instrCurr === 'USD') ? 0.595 : 0.70;
+                
+                let grossInstr = netReceivedInstr / taxMultiplier;
+                let taxInstr = grossInstr - netReceivedInstr;
+
+                // Round cleanly to 5 decimal places to avoid floating point sprawl
+                grossInstr = Math.round(grossInstr * 100000) / 100000;
+                taxInstr = Math.round(taxInstr * 100000) / 100000;
+
+                // Push to array exactly as before
+                allDividends.push({
+                    _sortDate: dateObj,
+                    "broker": "SaxoBank",
+                    "name": divName,
+                    "type": "Stock market",
+                    "search": row['Instrument ISIN'] || "",
+                    "exchange": row['Uitwisselingsbeschrijving'] || "",
+                    "date": formattedDate,
+                    "time": "12:00",
+                    "dividend-action": "Cash",
+                    "dividend-amount": grossInstr || "",
+                    "dividend-amount-currency": instrCurr,
+                    "dividend-amount-exchange-rate": finalExRate !== 1 ? finalExRate : "",
+                    "dividend-amount-exchange-rate-currency": finalExRate !== 1 ? baseCurr : "",
+                    "dividend-tax": taxInstr || "",
+                    "dividend-tax-currency": taxInstr > 0 ? instrCurr : "",
+                    "dividend-tax-exchange-rate": finalExRate !== 1 ? finalExRate : "",
+                    "dividend-tax-exchange-rate-currency": finalExRate !== 1 ? baseCurr : "",
+                    "dividend-costs": "",
+                    "dividend-costs-currency": "",
+                    "dividend-costs-exchange-rate": "",
+                    "dividend-costs-exchange-rate-currency": ""
+                });
+            } 
+            
+            // BOOKINGS
+            else if (typeLower === 'storting/opname' || typeLower === 'cash' || typeLower === 'deposit/withdrawal') {
+                const amt = parseFloat(row['Boekingsbedrag'] || 0);
+                if (amt !== 0) {
+                    allBookings.push({
+                        _sortDate: dateObj,
+                        "broker": "SaxoBank",
+                        "date": formattedDate,
+                        "time": "0:00",
+                        "booking-action": amt > 0 ? 'Deposit' : 'Withdrawal',
+                        "booking-amount": Math.abs(amt),
+                        "booking-amount-currency": row['Valuta'] || "EUR"
+                    });
+                }
+            }
+        });
+
+        filesProcessed++;
+        
+        if (filesProcessed === totalFiles) {
+            exportMasterFile();
+        }
+    }
+
+    function exportMasterFile() {
+        const sortByDateAsc = (a, b) => a._sortDate - b._sortDate;
+        allTransactions.sort(sortByDateAsc);
+        allDividends.sort(sortByDateAsc);
+        allBookings.sort(sortByDateAsc);
+
+        allTransactions.forEach(t => delete t._sortDate);
+        allDividends.forEach(d => delete d._sortDate);
+        allBookings.forEach(b => delete b._sortDate);
+
+        const newWb = XLSX.utils.book_new();
+
+        const wsTrans = XLSX.utils.json_to_sheet(allTransactions, { header: HEADERS_TRANSACTIONS });
+        const wsDiv = XLSX.utils.json_to_sheet(allDividends, { header: HEADERS_DIVIDENDS });
+        const wsBook = XLSX.utils.json_to_sheet(allBookings, { header: HEADERS_BOOKINGS });
+        const wsExp = XLSX.utils.json_to_sheet([], { header: HEADERS_EXPENSES }); 
+
+        XLSX.utils.book_append_sheet(newWb, wsTrans, "Transactions");
+        XLSX.utils.book_append_sheet(newWb, wsDiv, "Dividends");
+        XLSX.utils.book_append_sheet(newWb, wsBook, "Bookings");
+        XLSX.utils.book_append_sheet(newWb, wsExp, "Expenses");
+
+        const outFileName = "PDT_Import_Merged.xlsx";
+        XLSX.writeFile(newWb, outFileName);
+
+        logMessage(`<strong>Success!</strong> Merged ${totalFiles} file(s) into ${outFileName}.<br> 
+                    <small>Total Data: ${allTransactions.length} Transactions | ${allDividends.length} Dividends | ${allBookings.length} Bookings</small>`, 'success');
+    }
+</script>
+
+</body>
+</html>
