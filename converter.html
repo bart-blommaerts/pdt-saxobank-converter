@@ -168,13 +168,18 @@
                 let brokerFee = Math.round((totalCosts - calculatedTax - conversionCost) * 100) / 100;
                 if (brokerFee < 0) brokerFee = 0;
 
+                let exchangeValue = row['Uitwisselingsbeschrijving'] || "";
+                if (exchangeValue === "Deutsche Börse (Indices & ETFs)") {
+                    exchangeValue = "XETRA Exchange";
+                }
+
                 allTransactions.push({
                     _sortDate: dateObj, 
                     "broker": "SaxoBank",
                     "name": instrName,
                     "type": "Stock market",
                     "search": row['Instrument ISIN'] || "",
-                    "exchange": row['Uitwisselingsbeschrijving'] || "",
+                    "exchange": exchangeValue,
                     "date": formattedDate,
                     "time": "12:00",
                     "transaction-action": parsed.action,
