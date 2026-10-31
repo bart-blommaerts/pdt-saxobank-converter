@@ -20,13 +20,44 @@
         .log-item { background: #fff; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid #3b82f6; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         .log-success { border-left-color: #10b981; }
         .log-error { border-left-color: #ef4444; }
+
+        /* Modal Styles for Browser View & Copy-Paste */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; z-index: 1000;
+        }
+        .modal-content {
+            background: white; width: 90%; max-width: 900px; max-height: 85vh;
+            border-radius: 12px; display: flex; flex-direction: column; overflow: hidden;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+        .modal-header {
+            padding: 20px 24px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center;
+        }
+        .modal-header h2 { margin: 0; font-size: 1.25rem; color: #0f172a; }
+        .close-btn { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: #64748b; }
+        .modal-body { padding: 24px; overflow-y: auto; flex: 1; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 16px; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }
+        .tab-btn { background: none; border: none; padding: 8px 16px; font-weight: 600; cursor: pointer; color: #64748b; border-radius: 6px; transition: all 0.2s; }
+        .tab-btn.active { background: #eff6ff; color: #3b82f6; }
+        .tab-pane { display: none; }
+        .tab-pane.active { display: block; }
+        textarea.export-data {
+            width: 100%; height: 280px; font-family: monospace; font-size: 0.85rem;
+            padding: 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #f8fafc; resize: vertical;
+            white-space: pre; overflow-x: auto;
+        }
+        .copy-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .copy-row span { font-size: 0.9rem; color: #475569; font-weight: 500; }
+        .btn-sm { background-color: #10b981; color: white; padding: 6px 14px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9rem; }
+        .btn-sm:hover { background-color: #059669; }
     </style>
 </head>
 <body>
 
 <div class="container">
     <h1>Saxo to Portfolio Dividend Tracker</h1>
-    <p>Upload your Saxo Bank exports. The tool parses them locally, applies the correct PDT mappings and math, sorts chronologically, and downloads a ready-to-import `.xlsx` file.</p>
+    <p>Upload your Saxo Bank exports. The tool parses them locally, applies the correct PDT mappings and math, sorts chronologically, and opens an in-browser window to easily copy and paste your data.</p>
     
     <div class="dropzone" id="dropzone">
         <p>📁 Drag and drop Saxo Bank <strong>.xlsx</strong> files here (multiple files supported)</p>
@@ -37,6 +68,9 @@
 </div>
 
 <div id="log"></div>
+
+<!-- Modal Container for Browser View -->
+<div id="modalContainer"></div>
 
 <script>
     const HEADERS_TRANSACTIONS = ["broker","name","type","search","exchange","date","time","transaction-action","transaction-amount","transaction-price","transaction-price-currency","transaction-price-exchange-rate","transaction-price-exchange-rate-currency","transaction-costs","transaction-costs-currency","transaction-costs-exchange-rate","transaction-costs-exchange-rate-currency","transaction-tax","transaction-tax-currency","transaction-tax-exchange-rate","transaction-tax-exchange-rate-currency"];
@@ -220,11 +254,9 @@
                 let grossInstr = netReceivedInstr / taxMultiplier;
                 let taxInstr = grossInstr - netReceivedInstr;
 
-                // Round cleanly to 5 decimal places to avoid floating point sprawl
                 grossInstr = Math.round(grossInstr * 100000) / 100000;
                 taxInstr = Math.round(taxInstr * 100000) / 100000;
 
-                // Push to array exactly as before
                 allDividends.push({
                     _sortDate: dateObj,
                     "broker": "SaxoBank",
@@ -274,6 +306,17 @@
         }
     }
 
+    function objectsToTSV(dataArray, headers) {
+        if (!dataArray || dataArray.length === 0) return "";
+        return dataArray.map(row => {
+            return headers.map(header => {
+                let val = row[header];
+                if (val === undefined || val === null) val = "";
+                return String(val);
+            }).join("\t");
+        }).join("\n");
+    }
+
     function exportMasterFile() {
         const sortByDateAsc = (a, b) => a._sortDate - b._sortDate;
         allTransactions.sort(sortByDateAsc);
@@ -284,23 +327,102 @@
         allDividends.forEach(d => delete d._sortDate);
         allBookings.forEach(b => delete b._sortDate);
 
-        const newWb = XLSX.utils.book_new();
+        // Generate Tab-Separated Values (TSV) from data objects WITHOUT headers
+        const tsvTrans = objectsToTSV(allTransactions, HEADERS_TRANSACTIONS);
+        const tsvDiv = objectsToTSV(allDividends, HEADERS_DIVIDENDS);
+        const tsvBook = objectsToTSV(allBookings, HEADERS_BOOKINGS);
+        const tsvExp = ""; 
 
-        const wsTrans = XLSX.utils.json_to_sheet(allTransactions, { header: HEADERS_TRANSACTIONS });
-        const wsDiv = XLSX.utils.json_to_sheet(allDividends, { header: HEADERS_DIVIDENDS });
-        const wsBook = XLSX.utils.json_to_sheet(allBookings, { header: HEADERS_BOOKINGS });
-        const wsExp = XLSX.utils.json_to_sheet([], { header: HEADERS_EXPENSES }); 
+        openExportModal({
+            transactions: tsvTrans,
+            dividends: tsvDiv,
+            bookings: tsvBook,
+            expenses: tsvExp
+        });
 
-        XLSX.utils.book_append_sheet(newWb, wsTrans, "Transactions");
-        XLSX.utils.book_append_sheet(newWb, wsDiv, "Dividends");
-        XLSX.utils.book_append_sheet(newWb, wsBook, "Bookings");
-        XLSX.utils.book_append_sheet(newWb, wsExp, "Expenses");
-
-        const outFileName = "PDT_Import_Merged.xlsx";
-        XLSX.writeFile(newWb, outFileName);
-
-        logMessage(`<strong>Success!</strong> Merged ${totalFiles} file(s) into ${outFileName}.<br> 
+        logMessage(`<strong>Success!</strong> Processed ${totalFiles} file(s). Data ready for copy-paste.<br> 
                     <small>Total Data: ${allTransactions.length} Transactions | ${allDividends.length} Dividends | ${allBookings.length} Bookings</small>`, 'success');
+    }
+
+    function openExportModal(data) {
+        const existing = document.getElementById('exportModal');
+        if (existing) existing.remove();
+
+        const modalHTML = `
+        <div class="modal-overlay" id="exportModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Converted Data - Ready to Copy</h2>
+                    <button class="close-btn" onclick="document.getElementById('exportModal').remove()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="tabs">
+                        <button class="tab-btn active" onclick="switchTab(event, 'pane-trans')">Transactions (${allTransactions.length})</button>
+                        <button class="tab-btn" onclick="switchTab(event, 'pane-div')">Dividends (${allDividends.length})</button>
+                        <button class="tab-btn" onclick="switchTab(event, 'pane-book')">Bookings (${allBookings.length})</button>
+                        <button class="tab-btn" onclick="switchTab(event, 'pane-exp')">Expenses (0)</button>
+                    </div>
+
+                    <div class="tab-pane active" id="pane-trans">
+                        <div class="copy-row">
+                            <span>Transactions Data (Tab-Separated, No Header)</span>
+                            <button class="btn-sm" onclick="copyText('data-trans', this)">Copy Transactions</button>
+                        </div>
+                        <textarea id="data-trans" class="export-data" readonly>${data.transactions}</textarea>
+                    </div>
+
+                    <div class="tab-pane" id="pane-div">
+                        <div class="copy-row">
+                            <span>Dividends Data (Tab-Separated, No Header)</span>
+                            <button class="btn-sm" onclick="copyText('data-div', this)">Copy Dividends</button>
+                        </div>
+                        <textarea id="data-div" class="export-data" readonly>${data.dividends}</textarea>
+                    </div>
+
+                    <div class="tab-pane" id="pane-book">
+                        <div class="copy-row">
+                            <span>Bookings Data (Tab-Separated, No Header)</span>
+                            <button class="btn-sm" onclick="copyText('data-book', this)">Copy Bookings</button>
+                        </div>
+                        <textarea id="data-book" class="export-data" readonly>${data.bookings}</textarea>
+                    </div>
+
+                    <div class="tab-pane" id="pane-exp">
+                        <div class="copy-row">
+                            <span>Expenses Data (Tab-Separated, No Header)</span>
+                            <button class="btn-sm" onclick="copyText('data-exp', this)">Copy Expenses</button>
+                        </div>
+                        <textarea id="data-exp" class="export-data" readonly>${data.expenses}</textarea>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+
+        document.getElementById('modalContainer').innerHTML = modalHTML;
+    }
+
+    function switchTab(evt, paneId) {
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        document.querySelectorAll('.tab-pane').forEach(pane => pane.classList.remove('active'));
+        evt.currentTarget.classList.add('active');
+        document.getElementById(paneId).classList.add('active');
+    }
+
+    function copyText(elementId, btn) {
+        const textarea = document.getElementById(elementId);
+        textarea.select();
+        textarea.setSelectionRange(0, 99999);
+        navigator.clipboard.writeText(textarea.value).then(() => {
+            const originalText = btn.innerText;
+            btn.innerText = 'Copied!';
+            btn.style.backgroundColor = '#059669';
+            setTimeout(() => {
+                btn.innerText = originalText;
+                btn.style.backgroundColor = '';
+            }, 2000);
+        }).catch(err => {
+            alert('Failed to copy text: ' + err);
+        });
     }
 </script>
 
