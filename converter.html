@@ -205,6 +205,8 @@
                 let exchangeValue = row['Uitwisselingsbeschrijving'] || "";
                 if (exchangeValue === "Deutsche Börse (Indices & ETFs)") {
                     exchangeValue = "XETRA Exchange";
+                } else if (exchangeValue) {
+                    exchangeValue = exchangeValue.replace(/\s*\([^)]*\)/g, '').trim();
                 }
 
                 allTransactions.push({
@@ -240,6 +242,11 @@
                     divName += " (c)";
                 }
 
+                let divExchange = String(row['Uitwisselingsbeschrijving'] || "").trim();
+                if (divExchange) {
+                    divExchange = divExchange.replace(/\s*\([^)]*\)/g, '').trim();
+                }
+
                 const instrCurr = String(row['Instrumentvaluta'] || row['Valuta'] || 'EUR').trim();
                 const baseCurr = String(row['Valuta'] || 'EUR').trim();
                 
@@ -263,7 +270,7 @@
                     "name": divName,
                     "type": "Stock market",
                     "search": row['Instrument ISIN'] || "",
-                    "exchange": row['Uitwisselingsbeschrijving'] || "",
+                    "exchange": divExchange,
                     "date": formattedDate,
                     "time": "12:00",
                     "dividend-action": "Cash",
